@@ -1,0 +1,1 @@
+{"name":"prompt-theater","version":"1.0.0","private":true,"type":"module","scripts":{"start":"node src/server.js","test":"node --test --test-concurrency=1 test/*.test.js"},"dependencies":{"@fal-ai/client":"^1.6.2","express":"^5.1.0","pg":"^8.16.3","stripe":"^18.5.0"}}

@@ -1,0 +1,14 @@
+logLevel: info
+rtmp: yes
+rtmpAddress: :1935
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+hlsVariant: mpegts
+hlsSegmentCount: 7
+hlsSegmentDuration: 2s
+paths:
+  all_others:
+    source: publisher
+    runOnReady: "sh -c 'if [ -n \"$X_RTMP_URL\" ] && [ -n \"$X_RTMP_KEY\" ]; then exec ffmpeg -nostdin -loglevel warning -i rtsp://127.0.0.1:8554/$MTX_PATH -c copy -f flv \"${X_RTMP_URL%/}/$X_RTMP_KEY\"; fi'"
+    runOnReadyRestart: yes
