@@ -1,11 +1,12 @@
 import fs from 'node:fs/promises';
 import { ensureInterstitial } from './media.js';
 import { createStage } from './stage.js';
+import { createClock } from './clock.js';
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const COMPOSITOR_LOCK = 'prompt-theater-compositor';
 
 export function startCompositor({ db, cfg, pipeline, logger = console, stageFactory = createStage }) {
+  const clock = createClock();
   let stopped = false, stage = null, lock = null;
 
   const withHeartbeat = async (id, work) => {
@@ -22,6 +23,12 @@ export function startCompositor({ db, cfg, pipeline, logger = console, stageFact
       // A paid scene must never be left on 'playing'. Put it back in line, and if the
       // clip is simply unplayable, stop trying and refund.
       logger.error('scene playback failed', { scene_id: scene.id, attempt: attempts, error: error.message });
+      if (stopped) {
+        // We killed the encoder ourselves while shutting down. That is not the clip's
+        // fault, so it goes back in line without burning one of its attempts.
+        await db.transition(scene.id, 'ready', { shutdown: true });
+        return;
+      }
       if (attempts >= cfg.maxPlayAttempts) {
         await pipeline.requestRefund({ ...scene, play_attempts: attempts }, 'failed',
           `Playback failed after ${attempts} attempts: ${error.message}`, { play_attempts: attempts });
@@ -29,7 +36,7 @@ export function startCompositor({ db, cfg, pipeline, logger = console, stageFact
         await db.transition(scene.id, 'ready', { playback_error: error.message },
           { play_attempts: attempts, error: error.message });
       }
-      await sleep(1000);
+      await clock.sleep(1000);
       return;
     }
     await db.transition(scene.id, 'played', {}, { played_at: new Date(), play_attempts: attempts });
@@ -40,12 +47,16 @@ export function startCompositor({ db, cfg, pipeline, logger = console, stageFact
     // be kicked off the RTMP path by MediaMTX and strand its scene mid-broadcast.
     while (!stopped && !lock) {
       lock = await db.acquireLock(COMPOSITOR_LOCK);
-      if (!lock) { logger.error('compositor: stage lock held by another instance; standing by'); await sleep(5000); }
+      if (!lock) { logger.error('compositor: stage lock held by another instance; standing by'); await clock.sleep(5000); }
     }
+    // stop() may have landed while acquireLock or the stage were still starting up;
+    // whatever we opened has to be closed here or it outlives the compositor.
     if (stopped) return;
     logger.log('compositor: stage lock acquired');
     await ensureInterstitial(cfg);
-    stage = await stageFactory(cfg, logger);
+    const opened = await stageFactory(cfg, logger);
+    if (stopped) { await opened.stop(); return; }
+    stage = opened;
     while (!stopped) {
       try {
         await db.recoverStalePlaying(cfg.staleMs);
@@ -58,15 +69,19 @@ export function startCompositor({ db, cfg, pipeline, logger = console, stageFact
         }
       } catch (error) {
         logger.error('compositor iteration failed', error.message);
-        await sleep(1000);
+        await clock.sleep(1000);
       }
     }
   };
 
-  loop().catch(error => logger.error('compositor stopped', error));
+  const running = loop().catch(error => logger.error('compositor stopped', error));
+  // Stopping must actually be finished when the returned promise resolves: kill the
+  // encoder, let the loop unwind, then hand the stage lock to the next instance.
   return async () => {
     stopped = true;
+    clock.cancel();
     if (stage) await stage.stop();
-    if (lock) await lock.release();
+    await running;
+    if (lock) { await lock.release(); lock = null; }
   };
 }

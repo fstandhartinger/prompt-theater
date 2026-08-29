@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
-
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+import { createClock } from './clock.js';
 
 /**
  * Durable reconciler for everything that moves money.
@@ -11,6 +10,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
  * back up whose owner stopped heartbeating, and retries refunds until they succeed.
  */
 export function startWorker({ db, cfg, pipeline, logger = console }) {
+  const clock = createClock();
   let stopped = false;
   const loops = [];
 
@@ -27,7 +27,7 @@ export function startWorker({ db, cfg, pipeline, logger = console }) {
       } catch (error) {
         logger.error('worker processing failed', { scene_id: claimed?.scene?.id, error: error.message });
       }
-      if (!claimed) await sleep(cfg.workerPollMs);
+      if (!claimed) await clock.sleep(cfg.workerPollMs);
     }
   };
 
@@ -43,7 +43,7 @@ export function startWorker({ db, cfg, pipeline, logger = console }) {
       } catch (error) {
         logger.error('worker refund loop failed', { scene_id: scene?.id, error: error.message });
       }
-      if (!scene) await sleep(cfg.workerPollMs);
+      if (!scene) await clock.sleep(cfg.workerPollMs);
     }
   };
 
@@ -56,14 +56,14 @@ export function startWorker({ db, cfg, pipeline, logger = console }) {
           logger.log(`worker: pruned expired video for scene ${scene.id}`);
         }
       } catch (error) { logger.error('worker retention failed', error.message); }
-      for (let i = 0; i < 3600 && !stopped; i++) await sleep(1000);
+      await clock.sleep(3600000);
     }
   };
 
   for (const loop of [processing, refunds, retention]) {
     loops.push(loop().catch(error => logger.error('worker loop stopped', error)));
   }
-  return async () => { stopped = true; await Promise.allSettled(loops); };
+  return async () => { stopped = true; clock.cancel(); await Promise.allSettled(loops); };
 }
 
 // One reconciler pass, used by tests and by anything that wants a synchronous sweep.

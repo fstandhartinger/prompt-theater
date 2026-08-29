@@ -287,7 +287,7 @@ export function createDb(databaseUrl) {
     async acquireLock(name) {
       const client = await pool.connect();
       try {
-        const { rows } = await client.query('SELECT true AS ok');
+        const { rows } = await client.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [name]);
         if (!rows[0].ok) { client.release(); return null; }
       } catch (error) { client.release(); throw error; }
       return {
