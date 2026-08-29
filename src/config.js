@@ -6,6 +6,16 @@ const int = (name, fallback) => {
   return value;
 };
 
+// A malformed amount must never read as "no limit": Number('20 USD') is NaN, and every
+// comparison against NaN is false, which silently switched the daily spend cap off.
+const money = (name, fallback) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number of USD`);
+  return value;
+};
+
 const bool = (name, fallback) => {
   const value = process.env[name];
   if (value === undefined || value === '') return fallback;
@@ -15,13 +25,14 @@ const bool = (name, fallback) => {
 export function config() {
   const dataDir = process.env.DATA_DIR || '/data';
   const hlsBase = (process.env.HLS_INTERNAL_BASE || 'http://127.0.0.1:8888').replace(/\/$/, '');
+  const trustProxy = process.env.TRUST_PROXY || '1';
   return {
     port: int('PORT', 3000), databaseUrl: process.env.DATABASE_URL,
     falKey: process.env.FAL_KEY || '', falModel: process.env.FAL_MODEL || 'minimax/h3-max/text-to-video',
     stripeKey: process.env.STRIPE_SECRET_KEY || '', webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
     priceCents: int('STRIPE_PRICE_USD', 400), automaticTax: bool('STRIPE_AUTOMATIC_TAX', true),
     publicUrl: (process.env.PUBLIC_URL || 'http://localhost:3000').replace(/\/$/, ''),
-    sceneSeconds: int('SCENE_SECONDS', 15), maxDailySpendUsd: Number(process.env.MAX_DAILY_SPEND_USD || 20),
+    sceneSeconds: int('SCENE_SECONDS', 15), maxDailySpendUsd: money('MAX_DAILY_SPEND_USD', 20),
     openrouterKey: process.env.OPENROUTER_API_KEY || '', moderationModel: process.env.MODERATION_MODEL || 'z-ai/glm-5.3-flash',
     moderationFake: bool('MODERATION_FAKE', false), moderationTimeoutMs: int('MODERATION_TIMEOUT_MS', 15000),
     falTimeoutMs: int('FAL_TIMEOUT_MS', 600000), falPollMs: int('FAL_POLL_MS', 5000),
@@ -37,7 +48,10 @@ export function config() {
     maxGenerateAttempts: int('MAX_GENERATE_ATTEMPTS', 3), maxPlayAttempts: int('MAX_PLAY_ATTEMPTS', 3),
     checkoutRateLimit: int('CHECKOUT_RATE_LIMIT', 5), checkoutRateWindowMs: int('CHECKOUT_RATE_WINDOW_MS', 600000),
     retentionDays: int('RETENTION_DAYS', 30), errorTtlMs: int('ERROR_TTL_MS', 60000),
-    trustProxy: process.env.TRUST_PROXY || '1'
+    // Express reads a STRING here as a list of trusted proxy addresses, not as a hop
+    // count: 'trust proxy' = '1' trusts nothing, so req.ip collapses to the reverse
+    // proxy for every visitor and the checkout rate limit becomes a global 5-per-window.
+    trustProxy: /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy
   };
 }
 

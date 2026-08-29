@@ -5,9 +5,14 @@ import { run } from './media.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// Everything burned into the picture is English, including the disclosure label, which
+// rides on every frame we broadcast — interstitial, replay and paid scene alike.
+export const LABEL = 'AI-generated satire';
+
 export const overlay = (text, replay = false) => {
   const safe = String(text).replace(/[\\':%]/g, ' ').slice(0, 180);
-  const parts = [`drawtext=text='${safe}':fontcolor=white:fontsize=25:box=1:boxcolor=black@0.60:boxborderw=12:x=(w-text_w)/2:y=h-62`];
+  const parts = [`drawtext=text='${LABEL}':fontcolor=white:fontsize=20:box=1:boxcolor=black@0.55:boxborderw=8:x=w-text_w-24:y=24`];
+  if (safe) parts.push(`drawtext=text='${safe}':fontcolor=white:fontsize=25:box=1:boxcolor=black@0.60:boxborderw=12:x=(w-text_w)/2:y=h-62`);
   if (replay) parts.push("drawtext=text='REPLAY':fontcolor=white:fontsize=25:box=1:boxcolor=0xd14b3f@0.9:boxborderw=10:x=24:y=24");
   return parts.join(',');
 };
@@ -50,8 +55,7 @@ export async function createStage(cfg, logger = console) {
     get publisherPid() { return publisher?.pid ?? null; },
     async publish(file, { text = '', replay = false } = {}) {
       await fs.access(file);
-      const args = ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y', '-re', '-i', file];
-      if (text || replay) args.push('-vf', overlay(text, replay));
+      const args = ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y', '-re', '-i', file, '-vf', overlay(text, replay)];
       args.push('-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
         '-r', '30', '-g', '60', '-c:a', 'aac', '-ar', '48000', '-ac', '2',
         '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',

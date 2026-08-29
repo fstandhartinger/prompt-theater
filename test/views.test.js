@@ -39,3 +39,28 @@ test('user text is escaped everywhere it is rendered', () => {
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;&amp;&quot;&#39;/);
   assert.ok(!scenePage({ id: 2, status: 'played', prompt_display: nasty }).includes('<img src=x'));
 });
+
+// ---------------------------------------------------------------------------
+// The four wording/markup changes Florian asked for (ui-changes.md).
+// ---------------------------------------------------------------------------
+test('the prompt hint allows real people, because the show is satire', () => {
+  const html = page();
+  assert.ok(!/No real people/i.test(html), 'the blanket ban on real people must be gone');
+  assert.match(html, /10–300 characters\. No protected characters, sexual content, hate, harassment, or personal data\./);
+});
+
+test('the hint under the player is plain language, not HLS jargon', () => {
+  const html = page();
+  assert.ok(!/HLS segments/i.test(html), 'viewers do not know what an HLS segment is');
+  assert.match(html, /Give it a moment to start\./);
+});
+
+test('recent scenes are collapsible and start collapsed', () => {
+  const html = page({ scenes: [{ id: 7, status: 'played', prompt_display: 'FEED_MARKER' }] });
+  assert.match(html, /<details class="panel"><summary>Recent scenes<\/summary>/);
+  assert.ok(!/<details[^>]*\bopen\b/.test(html), 'the panel must be closed by default');
+  const details = html.slice(html.indexOf('<details'), html.indexOf('</details>'));
+  assert.ok(details.includes('FEED_MARKER'), 'the feed must live inside the collapsible panel');
+  assert.ok(!/<h2>Recent scenes<\/h2>/.test(html), 'the old static heading must be gone');
+  assert.match(html, /summary\{cursor:pointer/, 'the summary must look and feel clickable');
+});

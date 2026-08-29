@@ -255,6 +255,29 @@ test('reserveSpend is idempotent per scene so a retried generation cannot book t
   assert.equal(await db.spentToday(), 120);
 });
 
+// A cap that is not a real number used to read as "no limit": every comparison against
+// NaN is false, so reserveSpend approved everything and the fal bill was unbounded.
+test('an unusable daily cap stops spending instead of unlocking it', async () => {
+  await assert.rejects(() => db.reserveSpend(77, 120, NaN), /invalid daily cap/);
+  await assert.rejects(() => db.reserveSpend(77, 120, Number('20 USD' * 100)), /invalid daily cap/);
+  assert.equal(await db.spentToday(), 0, 'nothing may be booked against a broken cap');
+});
+
+test('a malformed MAX_DAILY_SPEND_USD is refused at startup, not silently ignored', () => {
+  const previous = process.env.MAX_DAILY_SPEND_USD;
+  try {
+    for (const bad of ['20 USD', 'twenty', '0', '-5']) {
+      process.env.MAX_DAILY_SPEND_USD = bad;
+      assert.throws(() => config(), /MAX_DAILY_SPEND_USD must be a positive number/, `accepted ${bad}`);
+    }
+    process.env.MAX_DAILY_SPEND_USD = '12.50';
+    assert.equal(config().maxDailySpendUsd, 12.5);
+  } finally {
+    if (previous === undefined) delete process.env.MAX_DAILY_SPEND_USD;
+    else process.env.MAX_DAILY_SPEND_USD = previous;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Finding 5: a failing ffmpeg used to leave the paid scene on 'playing' forever.
 // ---------------------------------------------------------------------------
@@ -355,6 +378,27 @@ test('checkout is rate limited per client', async t => {
   assert.equal((await buy()).status, 200);
   assert.equal((await buy()).status, 429, 'a flood of checkouts must be refused');
   assert.equal(stripe.calls.sessions.length, 3);
+});
+
+// The rate limit only protects the service if it can tell clients apart. Express reads a
+// STRING 'trust proxy' as a list of trusted addresses, not a hop count, so behind a
+// reverse proxy every visitor collapsed onto the proxy's IP and five checkouts per
+// window shut the shop for everybody.
+test('the checkout rate limit counts real clients, not the reverse proxy', async t => {
+  const stripe = stripeStub();
+  const app = await startApp({ cfg: { ...baseCfg(), checkoutRateLimit: 3, checkoutRateWindowMs: 60000 }, db, stripe });
+  t.after(() => app.close());
+  assert.equal(app.cfg.trustProxy, 1, "'trust proxy' must be a hop count, not the string '1'");
+  const buy = forwardedFor => fetch(`${app.base}/api/checkout`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': forwardedFor },
+    body: JSON.stringify({ prompt: 'A lighthouse in a storm painted in thick oils' })
+  });
+  for (let i = 1; i <= 6; i++) {
+    assert.equal((await buy(`203.0.113.${i}`)).status, 200, `customer 203.0.113.${i} was refused`);
+  }
+  for (let i = 0; i < 3; i++) assert.equal((await buy('198.51.100.7')).status, 200);
+  assert.equal((await buy('198.51.100.7')).status, 429, 'one noisy client must still be throttled');
 });
 
 // ---------------------------------------------------------------------------

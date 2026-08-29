@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createStage, overlay } from '../src/stage.js';
+import { createStage, overlay, LABEL } from '../src/stage.js';
 
 const exec = promisify(execFile);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -67,6 +67,20 @@ test('the stage refuses to publish a missing file instead of dying', async t => 
 
 test('overlay text cannot escape the drawtext filter', () => {
   const filter = overlay("a':drawbox=c=red%{pts}\\ ", false);
-  assert.ok(!/[\\':%]/.test(filter.slice(filter.indexOf("text='") + 6, filter.indexOf("':fontcolor"))));
+  // Check the segment carrying the user's text, not the constant label in front of it.
+  const drawn = filter.split(',drawtext=').find(part => !part.includes(LABEL));
+  assert.ok(drawn, 'the user text must be drawn in its own drawtext segment');
+  assert.ok(!/[\\':%]/.test(drawn.slice(drawn.indexOf("text='") + 6, drawn.indexOf("':fontcolor"))));
   assert.match(filter, /^drawtext=text='/);
+});
+
+// UI change 4: the burned-in labelling is English only, and it is on every clip we
+// broadcast — including the interstitial and replays, which carry no prompt text.
+test('every broadcast clip is labelled AI-generated satire in English', () => {
+  assert.equal(LABEL, 'AI-generated satire');
+  for (const filter of [overlay(''), overlay('a tiny robot'), overlay('a tiny robot', true)]) {
+    assert.ok(filter.includes(`text='${LABEL}'`), `missing the label in: ${filter}`);
+  }
+  assert.ok(!/[^\x00-\x7F]/.test(overlay('a tiny robot', true)), 'burned-in text must stay ASCII English');
+  assert.ok(!/KI-generiert|Satire\b(?!')/.test(overlay('a tiny robot')), 'no German labelling may remain');
 });

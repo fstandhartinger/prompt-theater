@@ -86,6 +86,9 @@ export function createDb(databaseUrl) {
 
     // Idempotent per scene: a retried generation must never book the budget twice.
     async reserveSpend(sceneId, cents, capCents) {
+      // Defence in depth for the one guard that stands between us and an unbounded fal
+      // bill: a cap that is not a real number is a configuration bug, not "unlimited".
+      if (!Number.isFinite(capCents)) throw new Error(`refusing to spend against an invalid daily cap (${capCents})`);
       return inTransaction(async client => {
         await client.query("SELECT pg_advisory_xact_lock(hashtext('prompt-theater-daily-spend'))");
         if (sceneId != null) {

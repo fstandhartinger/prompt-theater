@@ -11,16 +11,32 @@ test('moderation forwards the policy and the prompt and honours the model verdic
   const seen = [];
   const fetchMock = async (url, init) => {
     seen.push({ url, body: JSON.parse(init.body) });
-    return reply(JSON.stringify({ allow: false, reason: 'depicts a real person' }));
+    return reply(JSON.stringify({ allow: false, reason: 'invents a crime the person was never convicted of' }));
   };
   const verdict = await moderatePrompt('Tom Cruise flies to Mars', cfg, fetchMock);
-  assert.deepEqual(verdict, { allow: false, reason: 'depicts a real person' });
+  assert.deepEqual(verdict, { allow: false, reason: 'invents a crime the person was never convicted of' });
   assert.equal(seen[0].url, 'https://openrouter.ai/api/v1/chat/completions');
   assert.equal(seen[0].body.messages[1].content, 'Tom Cruise flies to Mars');
   assert.match(seen[0].body.messages[0].content, /Return ONLY strict JSON/);
   const allowed = await moderatePrompt('a watercolor fox in autumn leaves', cfg,
     async () => reply(JSON.stringify({ allow: true, reason: 'harmless' })));
   assert.deepEqual(allowed, { allow: true, reason: 'harmless' });
+});
+
+// UI change 1: real people are allowed as satire, so the policy we send the model must
+// say so. This asserts the instruction we ship, not the model's judgement of it.
+test('the moderation policy permits satire of real people but names the limits', async () => {
+  let policy = null;
+  await moderatePrompt('a caricature of a well-known politician', cfg, async (_url, init) => {
+    policy = JSON.parse(init.body).messages[0].content;
+    return reply(JSON.stringify({ allow: true, reason: 'satire' }));
+  });
+  assert.ok(!/any real person/i.test(policy), 'the blanket ban on real people must be gone');
+  assert.match(policy, /Real public figures ARE allowed as recognisable satire/);
+  for (const limit of [/crime or specific wrongdoing/i, /sexual/i, /endorsement/i, /factual news report/i,
+    /Private individuals/i, /protected franchises/i, /hate or harassment/i, /personal data/i]) {
+    assert.match(policy, limit);
+  }
 });
 
 // Finding 10: without response_format a chat model answers in a markdown block and every
