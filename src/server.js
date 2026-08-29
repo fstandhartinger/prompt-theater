@@ -1,69 +1,177 @@
 import express from 'express';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import Stripe from 'stripe';
-import { config } from './config.js';
+import { config, assertConfig } from './config.js';
 import { createDb } from './db.js';
 import { createPipeline } from './pipeline.js';
 import { validatePrompt } from './moderation.js';
 import { startCompositor } from './compositor.js';
+import { startWorker } from './worker.js';
 import { home, scenePage, privacy, imprint } from './views.js';
+
+// Events that mean "the customer's money has actually arrived".
+const PAID_EVENTS = new Set(['checkout.session.completed', 'checkout.session.async_payment_succeeded']);
+// Events that mean the money will never arrive; the reserved scene is released.
+const DEAD_EVENTS = new Set(['checkout.session.async_payment_failed', 'checkout.session.expired']);
+
+export function createRateLimiter({ limit, windowMs, now = Date.now }) {
+  const hits = new Map();
+  return key => {
+    const cutoff = now() - windowMs;
+    for (const [existing, stamps] of hits) {
+      const kept = stamps.filter(stamp => stamp > cutoff);
+      if (kept.length) hits.set(existing, kept); else hits.delete(existing);
+    }
+    const stamps = hits.get(key) || [];
+    if (stamps.length >= limit) return false;
+    stamps.push(now()); hits.set(key, stamps);
+    return true;
+  };
+}
 
 export async function createApp(overrides = {}) {
   const cfg = { ...config(), ...overrides.cfg };
+  if (!overrides.moderator) assertConfig(cfg);
   const db = overrides.db || createDb(cfg.databaseUrl); await db.migrate();
   const stripe = overrides.stripe || (cfg.stripeKey ? new Stripe(cfg.stripeKey) : null);
   const pipeline = overrides.pipeline || createPipeline({ db, cfg, stripe, moderator: overrides.moderator });
-  const app = express(); let lastError = null;
-  app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  const logger = overrides.logger || console;
+  const app = express();
+  app.set('trust proxy', cfg.trustProxy);
+  // Health must reflect current dependencies, not the last exception ever caught, and it
+  // must not hand internal error text to anonymous callers.
+  let lastError = null;
+  const noteError = message => { lastError = { message, at: Date.now() }; };
+  const allowCheckout = createRateLimiter({ limit: cfg.checkoutRateLimit, windowMs: cfg.checkoutRateWindowMs });
+
+  app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     let event;
     try { event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], cfg.webhookSecret); }
     catch (error) { return res.status(400).json({ error: `Invalid webhook: ${error.message}` }); }
-    res.json({ received: true });
-    if (event.type === 'checkout.session.completed') void (async () => {
-      try {
-        const session = event.data.object;
-        const updated = await db.pool.query("UPDATE scenes SET status='moderating',updated_at=now() WHERE stripe_session_id=$1 AND status='awaiting_payment' RETURNING *", [session.id]);
-        if (!updated.rows[0]) return;
-        await db.pool.query('INSERT INTO events(kind,detail) VALUES($1,$2)', ['scene.status', JSON.stringify({ scene_id: updated.rows[0].id, status: 'moderating' })]);
-        await pipeline.process(updated.rows[0]);
-      } catch (error) { lastError = error.message; console.error('webhook processing failed', error.message); }
-    })();
+    try {
+      const session = event.data?.object || {};
+      // Only durable bookkeeping happens here, so it can be finished before acking.
+      // Everything expensive is picked up by the worker from the database.
+      if (PAID_EVENTS.has(event.type)) {
+        if (session.payment_status !== 'paid') {
+          logger.log(`webhook: ${event.type} for ${session.id} ignored (payment_status=${session.payment_status})`);
+        } else {
+          const scene = await db.markSessionPaid(session.id, session.amount_total, session.customer_details?.email || null);
+          if (!scene) logger.log(`webhook: no awaiting_payment scene for ${session.id} at ${session.amount_total}`);
+        }
+      } else if (DEAD_EVENTS.has(event.type)) {
+        await db.abandonSession(session.id, `Payment did not complete (${event.type}).`);
+      }
+      lastError = null;
+      res.json({ received: true });
+    } catch (error) {
+      // 500 makes Stripe redeliver, which is exactly what we want: nothing is lost.
+      noteError(error.message);
+      logger.error('webhook processing failed', error.message);
+      res.status(500).json({ error: 'Webhook processing failed.' });
+    }
   });
+
   app.use(express.json({ limit: '16kb' }));
+
   app.get('/hls/*path', async (req, res) => {
     try {
       let suffix = Array.isArray(req.params.path) ? req.params.path.join('/') : req.params.path;
       suffix = suffix.replace(/^live\/stream\//, 'stream/');
-      const upstream = await fetch(`http://127.0.0.1:8888/${suffix}`);
+      const upstream = await fetch(`${cfg.hlsBase}/${suffix}`);
       if (!upstream.ok) return res.sendStatus(upstream.status);
       res.type(upstream.headers.get('content-type') || 'application/octet-stream');
       res.set('cache-control', 'no-store'); res.send(Buffer.from(await upstream.arrayBuffer()));
     } catch { res.sendStatus(503); }
   });
+
   app.post('/api/checkout', async (req, res) => {
-    const checked = validatePrompt(req.body?.prompt); if (!checked.ok) return res.status(400).json({ error: checked.error });
+    const checked = validatePrompt(req.body?.prompt);
+    if (!checked.ok) return res.status(400).json({ error: checked.error });
+    if (!allowCheckout(req.ip || 'unknown')) return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
     if (!stripe) return res.status(503).json({ error: 'Payments are not configured.' });
     try {
-      const session = await stripe.checkout.sessions.create({ mode: 'payment', success_url: `${cfg.publicUrl}/?payment=success`, cancel_url: `${cfg.publicUrl}/?payment=cancelled`, line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: cfg.priceCents, product_data: { name: 'Prompt Theater scene' } } }], metadata: { prompt: checked.prompt } });
-      const result = await db.pool.query("INSERT INTO scenes(prompt,prompt_display,status,stripe_session_id,amount_cents) VALUES($1,$2,'awaiting_payment',$3,$4) RETURNING id", [checked.prompt, checked.display, session.id, cfg.priceCents]);
-      await db.pool.query('INSERT INTO events(kind,detail) VALUES($1,$2)', ['scene.created', JSON.stringify({ scene_id: result.rows[0].id })]);
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        success_url: `${cfg.publicUrl}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${cfg.publicUrl}/?payment=cancelled`,
+        line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: cfg.priceCents, tax_behavior: 'inclusive', product_data: { name: 'Prompt Theater scene' } } }],
+        ...(cfg.automaticTax ? { automatic_tax: { enabled: true } } : {}),
+        metadata: { prompt: checked.prompt }
+      });
+      await db.createScene({ prompt: checked.prompt, display: checked.display, sessionId: session.id, amountCents: cfg.priceCents });
+      lastError = null;
       res.json({ url: session.url });
-    } catch (error) { lastError = error.message; res.status(502).json({ error: 'Could not start checkout.' }); }
+    } catch (error) { noteError(error.message); logger.error('checkout failed', error.message); res.status(502).json({ error: 'Could not start checkout.' }); }
   });
-  app.get('/', async (_req, res, next) => { try { const [recent, count] = await Promise.all([db.pool.query('SELECT * FROM scenes ORDER BY created_at DESC LIMIT 20'), db.pool.query("SELECT count(*)::int n FROM scenes WHERE created_at::date=CURRENT_DATE")]); res.send(home({ scenes: recent.rows, today: count.rows[0].n, price: cfg.priceCents, publicUrl: cfg.publicUrl })); } catch (e) { next(e); } });
-  app.get('/scene/:id', async (req, res) => { if (!/^\d+$/.test(req.params.id)) return res.status(404).send('Not found'); const found = await db.pool.query('SELECT * FROM scenes WHERE id=$1', [req.params.id]); found.rows[0] ? res.send(scenePage(found.rows[0])) : res.status(404).send('Not found'); });
-  app.get('/privacy', (_req,res) => res.send(privacy())); app.get('/imprint', (_req,res) => res.send(imprint()));
-  app.use('/media', express.static(cfg.dataDir, { fallthrough: false, immutable: true, maxAge: '1d' }));
+
+  app.get('/', async (req, res, next) => {
+    try {
+      const sessionId = typeof req.query.session_id === 'string' && /^cs_[A-Za-z0-9_]{1,120}$/.test(req.query.session_id) ? req.query.session_id : null;
+      const [scenes, today, purchased] = await Promise.all([
+        db.listPublicScenes(20), db.countScenesToday(),
+        sessionId ? db.getSceneBySession(sessionId) : Promise.resolve(null)
+      ]);
+      const purchase = req.query.payment === 'success'
+        ? { id: purchased?.id || null, status: purchased?.status || null, sceneSeconds: cfg.sceneSeconds }
+        : null;
+      res.send(home({ scenes, today, price: cfg.priceCents, publicUrl: cfg.publicUrl, purchase }));
+    } catch (error) { next(error); }
+  });
+
+  app.get('/scene/:id', async (req, res, next) => {
+    try {
+      if (!/^\d+$/.test(req.params.id)) return res.status(404).send('Not found');
+      const scene = await db.getScene(req.params.id);
+      if (!scene || scene.status === 'awaiting_payment' || scene.status === 'abandoned') return res.status(404).send('Not found');
+      res.send(scenePage(scene));
+    } catch (error) { next(error); }
+  });
+
+  app.get('/privacy', (_req, res) => res.send(privacy()));
+  app.get('/imprint', (_req, res) => res.send(imprint()));
+
+  // Only scenes that have actually aired are downloadable; DATA_DIR is not a public mount.
+  app.get('/media/scenes/:file', async (req, res, next) => {
+    try {
+      const match = /^(\d+)\.mp4$/.exec(req.params.file);
+      if (!match) return res.sendStatus(404);
+      const scene = await db.getScene(match[1]);
+      if (!scene || scene.status !== 'played' || !scene.video_path) return res.sendStatus(404);
+      res.sendFile(path.resolve(cfg.scenesDir, `${scene.id}.mp4`), { maxAge: '1d', immutable: true },
+        error => { if (error && !res.headersSent) res.sendStatus(404); });
+    } catch (error) { next(error); }
+  });
+
   app.get('/healthz', async (_req, res) => {
-    const ready = await db.pool.query("SELECT count(*)::int n FROM scenes WHERE status='ready'"); let streamUp = false;
+    let dbOk = true, ready = null, refundsPending = null;
+    try { await db.ping(); ready = await db.countReady(); refundsPending = await db.countUnsettledRefunds(); }
+    catch { dbOk = false; }
+    let streamUp = false;
     try { const response = await fetch(cfg.hlsUrl); streamUp = response.ok && (await response.text()).includes('#EXTM3U'); } catch {}
-    res.status(lastError ? 503 : 200).json({ ok: !lastError, stream_up: streamUp, scenes_ready: ready.rows[0].n, last_error: lastError });
+    const degraded = Boolean(lastError && Date.now() - lastError.at < cfg.errorTtlMs);
+    res.status(dbOk ? 200 : 503).json({ ok: dbOk, stream_up: streamUp, scenes_ready: ready, refunds_pending: refundsPending, degraded });
   });
-  app.use((error,_req,res,_next) => { lastError = error.message; console.error(error); res.status(500).json({ error: 'Internal server error.' }); });
-  return { app, db, cfg, start: () => cfg.compositor && startCompositor(db, cfg) };
+
+  app.use((error, _req, res, _next) => {
+    noteError(error.message); logger.error(error);
+    res.status(500).json({ error: 'Internal server error.' });
+  });
+
+  const stoppers = [];
+  return {
+    app, db, cfg, pipeline,
+    start: () => {
+      if (cfg.worker) stoppers.push(startWorker({ db, cfg, pipeline, logger }));
+      if (cfg.compositor) stoppers.push(startCompositor({ db, cfg, pipeline, logger }));
+    },
+    stop: async () => { for (const stop of stoppers) await stop(); }
+  };
 }
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
-  const { app, cfg, start } = await createApp(); await fs.mkdir(cfg.scenesDir, { recursive: true });
+  const { app, cfg, start } = await createApp();
+  await fs.mkdir(cfg.scenesDir, { recursive: true });
   app.listen(cfg.port, '0.0.0.0', () => { console.log(`Prompt Theater listening on ${cfg.port}`); start(); });
 }

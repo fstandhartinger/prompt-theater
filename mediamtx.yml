@@ -6,7 +6,11 @@ hlsAddress: :8888
 hlsAlwaysRemux: yes
 hlsVariant: mpegts
 hlsSegmentCount: 7
-hlsSegmentDuration: 2s
+# One second keeps the very first playlist within reach of short scenes; the compositor
+# holds a single permanent publisher, so the muxer is never torn down between scenes.
+hlsSegmentDuration: 1s
+readTimeout: 30s
+writeTimeout: 30s
 paths:
   all_others:
     source: publisher

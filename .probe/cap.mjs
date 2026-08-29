@@ -1,0 +1,14 @@
+process.env.MAX_DAILY_SPEND_USD = '20 USD';
+const { config } = await import('../src/config.js');
+const cfg = config();
+console.log('maxDailySpendUsd =', cfg.maxDailySpendUsd);
+console.log('capCents = Math.round(x*100) =', Math.round(cfg.maxDailySpendUsd * 100));
+const { createDb } = await import('../src/db.js');
+const db = createDb('postgres://postgres@/postgres?host=/tmp/ptprobe/sock');
+await db.migrate();
+await db.pool.query('TRUNCATE spend_log RESTART IDENTITY');
+const capCents = Math.round(cfg.maxDailySpendUsd * 100);
+let allowed = 0;
+for (let i = 1; i <= 500; i++) if (await db.reserveSpend(i, 120, capCents)) allowed++;
+console.log(`scenes allowed with a $20 cap: ${allowed} (=$${(await db.spentToday())/100} booked)`);
+process.exit(0);

@@ -10,8 +10,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY src ./src
 COPY test ./test
-COPY mediamtx.yml supervisord.conf ./
+COPY mediamtx.yml supervisord.conf .env.example ./
 COPY scripts ./scripts
-RUN mkdir -p /data/scenes && chown -R node:node /data
+RUN mkdir -p /data/scenes && chown -R node:node /data && chown -R node:node /app
+USER node
 EXPOSE 3000 8888 1935
 CMD ["/usr/bin/supervisord","-c","/app/supervisord.conf"]
