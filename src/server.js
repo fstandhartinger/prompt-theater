@@ -129,6 +129,8 @@ export async function createApp(overrides = {}) {
     } catch (error) { next(error); }
   });
 
+  app.get('/analytics.js', (_req, res) => res.sendFile(path.resolve('src/analytics.js'), { maxAge: '1h' }));
+
   app.get('/privacy', (_req, res) => res.send(privacy()));
   app.get('/imprint', (_req, res) => res.send(imprint()));
 
