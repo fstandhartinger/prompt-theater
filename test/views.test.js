@@ -81,6 +81,13 @@ test('the home page says what the product is before the form', () => {
   assert.match(html, /id="buy"/, 'the checkout form stays on the page');
 });
 
+test('mobile reading order puts the value proposition and checkout before the live player', () => {
+  const html = page();
+  assert.ok(html.indexOf('class="stack action-stack"') < html.indexOf('class="stack live-stack"'));
+  assert.match(html, /\.hero \.live-stack\{grid-column:1;grid-row:1\}/, 'desktop keeps the player in the left column');
+  assert.match(html, /\.hero \.action-stack\{grid-column:2;grid-row:1\}/, 'desktop keeps the purchase panel in the right column');
+});
+
 test('pricing and scene duration metadata follow the configured product settings', () => {
   const html = page({ price: 725, sceneSeconds: 22 });
   assert.match(html, /pay \$7\.25/);
