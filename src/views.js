@@ -70,6 +70,8 @@ footer a:hover{color:var(--ink)}
 @media(min-width:760px){
   .wrap{padding:28px 28px 48px}
   .hero{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr);gap:26px;align-items:start}
+  .hero .live-stack{grid-column:1;grid-row:1}
+  .hero .action-stack{grid-column:2;grid-row:1}
   .stack{display:flex;flex-direction:column;gap:22px}
 }
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
@@ -199,15 +201,7 @@ const homeBody = ({ scenes, today, purchase, sceneSeconds, price, publicUrl }) =
     : '';
   return `${banner}
 <div class="hero">
-  <div class="stack">
-    <section class="panel" aria-label="Live broadcast">
-      <div class="badge live">LIVE</div>
-      <video id="player" class="video" controls autoplay muted playsinline aria-label="Live Prompt Theater broadcast"></video>
-      <p class="hint muted">Give it a moment to start.</p>
-    </section>
-    <details class="panel"><summary>Recent scenes</summary>${feed}</details>
-  </div>
-  <aside class="stack">
+  <div class="stack action-stack">
     <section class="panel" aria-label="Create the next scene">
       <span class="badge">Pay once — ${'$' + (price / 100).toFixed(2)}</span>
       <h1>Describe a scene. Watch it air live.</h1>
@@ -223,7 +217,15 @@ const homeBody = ({ scenes, today, purchase, sceneSeconds, price, publicUrl }) =
       <p class="meta">Total price ${'$' + (price / 100).toFixed(2)}, including any VAT that applies to your country; the exact amount is shown at checkout. Every scene is AI-generated. Prompts are checked against our content rules after payment and before generation — rejected prompts never air and are refunded in full, as are scenes we fail to generate or broadcast. Only scenes that have been paid for and cleared moderation appear in the feed above.</p>
       <p class="meta"><a href="/how">How screening and refunds work</a> · <a href="/your-prompt">What happens to your prompt</a> · <a href="/about">More about the show</a></p>
     </section>
-  </aside>
+  </div>
+  <div class="stack live-stack">
+    <section class="panel" aria-label="Live broadcast">
+      <div class="badge live">LIVE</div>
+      <video id="player" class="video" controls autoplay muted playsinline aria-label="Live Prompt Theater broadcast"></video>
+      <p class="hint muted">Give it a moment to start.</p>
+    </section>
+    <details class="panel"><summary>Recent scenes</summary>${feed}</details>
+  </div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.6.13/hls.min.js"></script><script>const v=document.querySelector('#player'),u=${JSON.stringify(publicUrl + '/hls/live/stream/index.m3u8')};
 if(window.Hls&&Hls.isSupported()){const h=new Hls({liveDurationInfinity:true});h.loadSource(u);h.attachMedia(v);h.on(Hls.Events.ERROR,(_e,d)=>{if(!d.fatal)return;if(d.type===Hls.ErrorTypes.NETWORK_ERROR){setTimeout(()=>{h.loadSource(u);h.startLoad()},2000)}else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){h.recoverMediaError()}else{setTimeout(()=>location.reload(),5000)}})}
