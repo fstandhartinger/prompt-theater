@@ -10,6 +10,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY src ./src
 COPY test ./test
+COPY public ./public
 COPY mediamtx.yml supervisord.conf .env.example ./
 COPY scripts ./scripts
 RUN mkdir -p /data/scenes && chown -R node:node /data && chown -R node:node /app

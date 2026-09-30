@@ -8,7 +8,7 @@ import { createPipeline } from './pipeline.js';
 import { validatePrompt } from './moderation.js';
 import { startCompositor } from './compositor.js';
 import { startWorker } from './worker.js';
-import { home, scenePage, privacy, imprint } from './views.js';
+import { home, scenePage, privacy, imprint, about, how, yourPrompt, robotsTxt, sitemapXml, llmsTxt } from './views.js';
 
 // Events that mean "the customer's money has actually arrived".
 const PAID_EVENTS = new Set(['checkout.session.completed', 'checkout.session.async_payment_succeeded']);
@@ -39,6 +39,7 @@ export async function createApp(overrides = {}) {
   const logger = overrides.logger || console;
   const app = express();
   app.set('trust proxy', cfg.trustProxy);
+  app.disable('x-powered-by');
   // Health must reflect current dependencies, not the last exception ever caught, and it
   // must not hand internal error text to anonymous callers.
   let lastError = null;
@@ -116,7 +117,7 @@ export async function createApp(overrides = {}) {
       const purchase = req.query.payment === 'success'
         ? { id: purchased?.id || null, status: purchased?.status || null, sceneSeconds: cfg.sceneSeconds }
         : null;
-      res.send(home({ scenes, today, price: cfg.priceCents, publicUrl: cfg.publicUrl, purchase }));
+      res.send(home({ scenes, today, price: cfg.priceCents, publicUrl: cfg.publicUrl, purchase, sceneSeconds: cfg.sceneSeconds, origin: cfg.publicUrl }));
     } catch (error) { next(error); }
   });
 
@@ -125,14 +126,31 @@ export async function createApp(overrides = {}) {
       if (!/^\d+$/.test(req.params.id)) return res.status(404).send('Not found');
       const scene = await db.getScene(req.params.id);
       if (!scene || scene.status === 'awaiting_payment' || scene.status === 'abandoned') return res.status(404).send('Not found');
-      res.send(scenePage(scene));
+      res.send(scenePage(scene, cfg.publicUrl, cfg.sceneSeconds));
     } catch (error) { next(error); }
   });
 
   app.get('/analytics.js', (_req, res) => res.sendFile(path.resolve('src/analytics.js'), { maxAge: '1h' }));
 
-  app.get('/privacy', (_req, res) => res.send(privacy()));
-  app.get('/imprint', (_req, res) => res.send(imprint()));
+  app.get('/privacy', (_req, res) => res.send(privacy(cfg.publicUrl)));
+  app.get('/imprint', (_req, res) => res.send(imprint(cfg.publicUrl)));
+
+  // Explanatory pages: static, cheap, and the targets search engines should rank.
+  app.get('/about', (_req, res) => res.send(about(cfg.priceCents, cfg.sceneSeconds, cfg.publicUrl)));
+  app.get('/how', (_req, res) => res.send(how(cfg.priceCents, cfg.publicUrl)));
+  app.get('/your-prompt', (_req, res) => res.send(yourPrompt(cfg.publicUrl)));
+
+  // SEO and discovery files.
+  app.get('/robots.txt', (_req, res) => res.type('text/plain').send(robotsTxt()));
+  app.get('/sitemap.xml', (_req, res) => res.type('application/xml').send(sitemapXml()));
+  app.get('/llms.txt', (_req, res) => res.type('text/plain').send(llmsTxt(cfg.priceCents, cfg.sceneSeconds)));
+  app.get('/fc30d6f5bd66213395ee6edc0ba8e755.txt', (_req, res) =>
+    res.type('text/plain').sendFile(path.resolve('public/fc30d6f5bd66213395ee6edc0ba8e755.txt')));
+
+  // Static brand assets (og image, favicon).
+  for (const [route, file] of [['/brand/og-image.png', 'og-image.png'], ['/brand/logo.svg', 'logo.svg'], ['/brand/favicon.svg', 'favicon.svg']]) {
+    app.get(route, (_req, res) => res.sendFile(path.resolve('public/brand', file), { maxAge: '7d' }));
+  }
 
   // Only scenes that have actually aired are downloadable; DATA_DIR is not a public mount.
   app.get('/media/scenes/:file', async (req, res, next) => {
